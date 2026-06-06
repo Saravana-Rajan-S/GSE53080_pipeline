@@ -2,7 +2,14 @@
 
 Pipeline for analyzing small RNA-seq data from GSE53080 (Akat et al. 2014, PNAS).
 
+**Dataset:** Akat et al. 2014, PNAS 111(30):11151-11156  
+**GEO Accession:** GSE53080 | **SRA Study:** SRP033566  
+**Total samples:** 185 (metadata) → 180 analyzed (5 excluded for batch effect)
+
+---
+
 ## 📁 Folder Structure
+
 The GSE53080 dataset is organized into 35 folders based on tissue type, read length, and disease status. This structure was derived from metadata cross-checking against the SraRunTable (PRJNA230811) and includes 5 critical corrections.
 
 ### Organization Logic
@@ -58,3 +65,153 @@ GSE53080/
 
 > **Full details:** See [`docs/folder_assignments.md`](docs/folder_assignments.md)
 
+---
+
+## 🔬 Barcode Verification (COMPLETE)
+
+### Adapter Structure
+
+```
+[5nt sample-specific barcode] + TCGTATGCCGTCTTCTGCTTG
+         ↑                        ↑
+      5nt barcode           4nt invariant (TCGT)
+      (20 unique)           + 17nt Illumina adapter
+```
+
+- **20 adapters (Ad01–Ad20)** with unique 5nt barcodes
+- **Full adapter:** 26nt
+- **9nt signature:** 5nt barcode + TCGT (used for verification)
+- **Match policy:** EXACT MATCH, 0 mismatches
+- **Search method:** SLIDING SEARCH through full read (no fixed position)
+
+### Verification Results (180 files)
+
+| Status | Count | % | Tissue Distribution |
+|--------|-------|---|---------------------|
+| **Clean** | 152 | 84.4% | All myocardium, other tissues, most plasma |
+| **WARNING** | 28 | 15.6% | Plasma (16) + Serum (12) only |
+| INFO | 0 | 0% | — |
+| CRITICAL | 0 | 0% | — |
+
+### Adapter Rate by Tissue
+
+| Tissue | Avg Adapter Rate | Assessment |
+|--------|-----------------|------------|
+| Myocardium (51nt) | 99.4% | Excellent |
+| Myocardium (36nt) | 96.7% | Excellent |
+| Other tissues | 98.9% | Excellent |
+| Plasma (51nt) | 91.1% | Good |
+| Serum (51nt) | 71.6% | Lower (biologically expected) |
+
+### Key Metrics
+
+- **Barcode start position median:** 23 (1-based) → 22nt RNA insert, typical for mature miRNAs
+- **Read lengths:** 168×51nt, 8×36nt, 2×40nt, 2×76nt
+- **All barcodes cleanly assigned:** No mixed barcodes → demultiplexing was correct
+
+**Files:**
+- [`docs/barcode_verification_report.csv`](docs/barcode_verification_report.csv) — Full 180-sample report
+- [`config/barcode_mapping.csv`](config/barcode_mapping.csv) — Clean SRR → Barcode mapping for trimming
+- [`src/preprocessing/verify_barcodes.py`](src/preprocessing/verify_barcodes.py) — Verification script
+
+---
+
+## 🧪 28 WARNING Files — 5nt vs 9nt Diagnostic (COMPLETE)
+
+### The Problem
+
+28 files showed "low adapter rate" in the initial 9nt scan:
+- **9nt rate:** 49.95% – 77.07%
+- All are **plasma** or **serum** (no myocardium or other tissues)
+
+**Hypothesis:** The 5nt barcode is present at 100%, but the TCGT suffix is degraded/mutated in ~30–50% of reads. This is biologically expected in plasma/serum due to RNase activity.
+
+### Diagnostic Method (v4)
+
+1. **Single-pass sliding scan** — 9nt checked first; if not found, 5nt counted with `seq.count()`
+2. **Double-hit detection** — counts reads where the 5nt barcode appears **2+ times** (once real adapter, once random noise inside RNA)
+3. **Threshold:** ≥10% double-hit rate = significant false positive contamination
+
+### Diagnostic Results
+
+| Metric | Value | Interpretation |
+|--------|-------|----------------|
+| **5nt-total %** | **100.0% in ALL 28 files** | Every read contains the assigned barcode |
+| **9nt %** | 49.95% – 77.07% | True adapter rate (barcode + intact TCGT) |
+| **Gap (5nt − 9nt)** | 22.06% – 50.05% | Reads with degraded TCGT suffix |
+| **Double-hit %** | **0.02% – 2.57%** | Random false positive contamination |
+| **False positive threshold** | <10% | **All 28 files pass** |
+
+### Conclusion
+
+> **TCGT ERROR confirmed in all 28 WARNING files.** The 5nt barcode is present and correctly placed in 100% of reads. The ~30–50% gap between 5nt and 9nt represents genuine adapter molecules where the TCGT suffix is degraded or mutated — **not** barcode misassignment or random noise.
+
+**Why serum is worse than plasma:** Serum is collected after blood clotting, which releases RNases that degrade RNA and damage the adapter sequence. Plasma (anti-coagulated) avoids this. This is biologically expected and validates data quality.
+
+### Trimming Strategy
+
+**All 180 files are suitable for trimming at the 5nt barcode position.**
+
+- Trim point: right before the 5nt barcode (wherever it occurs in the read)
+- Tool: `cutadapt` with the full 26nt adapter sequence
+- The 5nt barcode is the correct trim anchor for all scenarios
+
+**Files:**
+- [`docs/warning_files_5nt_vs_9nt_diagnostic.csv`](docs/warning_files_5nt_vs_9nt_diagnostic.csv) — Full 28-file diagnostic report
+- [`src/preprocessing/verify_28_warning_files.py`](src/preprocessing/verify_28_warning_files.py) — Diagnostic script (v4)
+
+---
+
+## 🛠️ Tools & References
+
+### Installed Tools
+- `cutadapt` — adapter trimming
+- `bowtie2` — alignment
+- `samtools` — BAM manipulation
+- `fastqc` — quality control
+- `multiqc` — report aggregation
+- `bedtools` — genomic operations
+- `featureCounts` (subread) — read counting
+- R + Bioconductor (DESeq2, edgeR, ggplot2)
+- Python (pandas, numpy, pysam)
+
+### Reference Databases
+Located at `/home/saravana/Downloads/smallRNA_references/`:
+- `01_mirbase/` — hairpin.fa, mature.fa
+- `02_yrna/` — YRNA_reference.fa + .bt2 indices
+- `03_gtrnadb/` — hg38-mature-tRNAs.fa
+- `04_snorna/` — human_snoRNAs.fa
+- `05_pirna/` — hsa.gold.fa, hsa.v3.0.fa, Cardiovascular.txt
+- `06_hg38/` — 6 .bt2 index files
+- `07_combined/` — smallRNA_combined_dedup.fa + 6 .bt2 index files
+
+---
+
+## 📋 Pipeline Steps
+
+| Step | Status | Description |
+|------|--------|-------------|
+| 1. Folder structure | ✅ Complete | 180 samples organized, 5 corrections applied |
+| 2. Barcode verification | ✅ Complete | 180 files scanned, 28 flagged for TCGT analysis |
+| 3. 5nt vs 9nt diagnostic | ✅ Complete | All 28 files confirmed TCGT error, ready for trimming |
+| 4. FastQC (pre-trim) | ⬜ Pending | Run on representative samples, aggregate with MultiQC |
+| 5. Trimming (cutadapt) | ⬜ Pending | Trim at 5nt barcode position using full adapter |
+| 6. Alignment (3-round) | ⬜ Pending | Bowtie2 to smallRNA index → hg38 → hairpin |
+| 7. Quantification | ⬜ Pending | featureCounts / custom counting, build count matrix |
+| 8. Normalization | ⬜ Pending | TPM, DESeq2 size factors |
+| 9. Differential Expression | ⬜ Pending | DESeq2, edgeR, volcano plots |
+| 10. tRF/yRF & isomiR | ⬜ Pending | Classification and extraction |
+| 11. Machine Learning | ⬜ Pending | RF, XGBoost, LASSO, SHAP |
+
+---
+
+## 📝 Citation
+
+Akat KM, Moore-McGriff D, Morozov P, Brown M, Gogakos T, Correa da Rosa J, et al. Comparative RNA-sequencing analysis of myocardial and circulating small RNAs in human heart failure and their utility as biomarkers. *Proc Natl Acad Sci USA*. 2014;111(30):11151-11156.
+
+---
+
+## 👤 Author
+
+**Saravana Rajan S**  
+GitHub: [Saravana-Rajan-S](https://github.com/Saravana-Rajan-S)
