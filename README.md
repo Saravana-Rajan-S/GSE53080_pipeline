@@ -148,13 +148,15 @@ GSE53080/
 
 **Why serum is worse than plasma:** Serum is collected after blood clotting, which releases RNases that degrade RNA and damage the adapter sequence. Plasma (anti-coagulated) avoids this. This is biologically expected and validates data quality.
 
-### Trimming Strategy
+### Trimming Strategy Applied
 
-**All 180 files are suitable for trimming at the 5nt barcode position.**
+**All 180 files were trimmed at the 5nt barcode position using a dual-pass cutadapt strategy.**
 
-- Trim point: right before the 5nt barcode (wherever it occurs in the read)
-- Tool: `cutadapt` with the full 26nt adapter sequence
-- The 5nt barcode is the correct trim anchor for all scenarios
+- Pass 1: 9nt exact match (barcode + TCGT), 0 mismatches
+- Pass 2: 5nt barcode rescue on Pass 1 leftovers
+- Final output: `trimmed/5nt_matched/` — 99.89% read retention across all 180 samples
+
+See the [Trimming section](#️-trimming--dual-pass-strategy-complete) for full results.
 
 **Files:**
 - [`docs/warning_files_5nt_vs_9nt_diagnostic.csv`](docs/warning_files_5nt_vs_9nt_diagnostic.csv) — Full 28-file diagnostic report
@@ -162,7 +164,161 @@ GSE53080/
 
 ---
 
-## 🛠️ Tools & References
+## 🔍 FastQC / MultiQC — Pre-Trimming QC (COMPLETE)
+
+### Overview
+
+FastQC was run on all 180 FASTQ files with batch segregation by sequencing platform, then MultiQC aggregated each batch separately. **Zero samples were excluded.**
+
+| Metric | Value |
+|--------|-------|
+| Files analysed | 180 |
+| Tools | FastQC + MultiQC |
+| Samples excluded | 0 (5 already excluded at folder structure step) |
+| Batches | 3 (HiSeq2000 non-serum, HiSeq2000 serum, GA IIx) |
+
+### Sequencing Platform Batches
+
+Samples were segregated by sequencer from SraRunTable metadata before MultiQC aggregation — mixing platforms in a single MultiQC report obscures platform-specific quality artefacts.
+
+| Batch | Platform | Samples | MultiQC Report |
+|-------|----------|---------|----------------|
+| A1 | Illumina HiSeq 2000 — non-serum | 132 | `qc/multiqc/batch_hiseq/` |
+| A2 | Illumina HiSeq 2000 — serum | 18 | `qc/multiqc/batch_hiseq_serum/` |
+| B | Illumina GA IIx | 30 | `qc/multiqc/batch_gaiix/` |
+
+FastQC outputs are stored per-batch:
+```
+qc/
+├── fastqc/
+│   ├── hiseq2000/
+│   │   ├── non_serum/   ← 132 FastQC reports
+│   │   └── serum/       ← 18 FastQC reports
+│   └── gaiix/
+│       └── all/         ← 30 FastQC reports
+└── multiqc/
+    ├── batch_hiseq/         ← HiSeq2000 non-serum report
+    ├── batch_hiseq_serum/   ← HiSeq2000 serum report
+    └── batch_gaiix/         ← GA IIx report
+```
+
+### Read Length Distribution
+
+| Read length | Files | Tissue |
+|-------------|-------|--------|
+| 51 nt | 168 | Myocardium, Plasma, Serum, most Other |
+| 36 nt | 8 | Myocardium 36nt group |
+| 40 nt | 2 | Other tissues |
+| **76 nt** | **2** | **Skeletal muscle (SRR1044514, SRR1044518) — GA IIx batch** |
+
+### SRR1044514 & SRR1044518 — FastQC FAIL Flags Explained
+
+The only two 76 nt files in the dataset (GA IIx batch, skeletal muscle). FastQC flagged multiple FAIL modules — all are artefacts, not data quality problems.
+
+**Root cause:** The sequencer ran 76 cycles on ~22 nt inserts. After insert (22 nt) + adapter (26 nt) = 48 nt of meaningful content, the remaining ~28 positions read random flanking sequence — **adapter read-through**.
+
+| FastQC FAIL | Cause | Action |
+|-------------|-------|--------|
+| Per base sequence quality | Quality drops at position ~48 — read-through zone | Trimming removes it |
+| Per tile sequence quality | Tile-level artefact from same read-through | Trimming removes it |
+| Per base sequence content | Chaotic %ATGC at positions 48–76 | Trimming removes it |
+| Sequence Duplication Levels | ~2,500 unique miRNA sequences — duplication expected for small RNA | Ignore (module irrelevant for small RNA) |
+| Overrepresented sequences | Real miRNA reads carrying barcode + adapter tail | Expected and correct |
+| Adapter Content | Adapter genuinely present at position ~22 | Cutadapt handles it |
+
+**Verdict:** Both files are clean skeletal muscle small RNA libraries. FAILs are 100% artefacts of a 76 nt run on 22 nt inserts. Trimming parameters are identical to all other files.
+
+### Low-Read Files (<1M Reads)
+
+23 files fell below 1M reads — all investigated and retained:
+
+| Tissue type | Count | Explanation |
+|-------------|-------|-------------|
+| Plasma | 19 | Circulating miRNA packaged in exosomes/AGO2; 100–1000× less starting material than tissue |
+| Serum | 3 | Additional RNase exposure during 30–60 min clotting; no EDTA anticoagulant |
+| Liver (SRR1044448) | 1 | 989K reads — borderline, Clean status, technical variability |
+
+Note: EDTA (present in plasma collection tubes) chelates Mg²⁺, inhibiting RNases — this is why plasma yields are generally better than serum within the same disease group.
+
+### Trimming Readiness
+
+| Check | Status |
+|-------|--------|
+| FastQC on all 180 files | ✅ |
+| MultiQC — 3 batch reports | ✅ |
+| SRR1044514/18 FAILs explained | ✅ Artefact, not defect |
+| Low-read files confirmed biological | ✅ |
+| Samples to exclude | ✅ None |
+
+**Files:**
+- [`src/preprocessing/run_fastqc_multiqc.py`](src/preprocessing/run_fastqc_multiqc.py) — FastQC + MultiQC runner with platform batch segregation
+- [`qc/`](qc/) — FastQC HTML reports and MultiQC summaries (3 batch reports)
+
+
+
+### Strategy
+
+A two-pass cutadapt pipeline was designed to maximise read retention, specifically to rescue reads from plasma and serum samples where the TCGT suffix is degraded.
+
+```
+Pass 1 — 9nt exact match (Strategy A)
+  cutadapt -a [barcode+TCGT] -O 9 -e 0 -m 15
+  → Trimmed reads  → 9nt_match/
+  → Untrimmed reads (TCGT-degraded) → rescued_input/
+
+Pass 2 — 5nt rescue on leftovers (Strategy B)
+  cutadapt -a [barcode] -O 5 -e 0 -m 15 --discard-untrimmed
+  → Rescued reads  → 5nt_rescued/
+
+Pass 3 — Merge
+  cat 9nt_match/ + 5nt_rescued/ → 5nt_matched/   (final output)
+```
+
+> **Key design decision:** `-M 45` (maximum length filter) was intentionally removed from both passes. It was silently discarding reads before they could reach `--untrimmed-output`, causing reads to vanish without a rescue path. Length filtering is not applied at the trimming stage.
+
+### Output Folders
+
+| Folder | Contents | Files |
+|--------|----------|-------|
+| `trimmed/9nt_match/` | Pass 1 trimmed reads (9nt exact) | 180 |
+| `trimmed/rescued_input/` | Untrimmed leftovers from Pass 1 | 180 |
+| `trimmed/5nt_rescued/` | Pass 2 rescued reads (5nt match) | 180 |
+| `trimmed/5nt_matched/` | Final merged output | 180 |
+
+### Results
+
+| Metric | Value |
+|--------|-------|
+| Total original reads | 917,831,939 |
+| 9nt matched | 866,547,789 (94.4%) |
+| 5nt rescued | 50,302,602 (5.5%) |
+| **Final retained** | **916,850,391 (99.89%)** |
+| Unrecoverable loss | 981,548 (0.11%) |
+| Avg rescue % per sample | 7.33% |
+
+### Rescue Rate by Sample Type
+
+| Sample type | Avg rescue % | Notes |
+|-------------|-------------|-------|
+| Myocardium 51nt | ~0.5% | High quality, minimal degradation |
+| Myocardium 36nt | ~3–5% | Shorter reads, more partial adapters |
+| Plasma 51nt | 2–38% | Cell-free miRNA, moderate degradation |
+| Serum 51nt | 22–34% | Post-clotting RNase activity, most degraded |
+
+### Post-Trimming Verification
+
+All 180 samples cross-validated against the pre-trimming barcode report:
+- Barcode, Adapter ID, Tissue group, Total reads, Adapter %, Status — **all 180/180 match**
+- RNA insert length median post-trim = pre-trim median — **180/180 exact**
+- Residual 5nt barcode signal: 1.89% — confirmed as internal biological false positives (random 5-mer occurrence), not trimming failures
+
+**Files:**
+- [`src/preprocessing/run_dual_trimming.py`](src/preprocessing/run_dual_trimming.py) — Dual-pass trimming pipeline
+- [`src/preprocessing/verify_post_trimming.py`](src/preprocessing/verify_post_trimming.py) — Post-trimming verification script
+- [`docs/trimming_comparison_summary.csv`](docs/trimming_comparison_summary.csv) — Per-sample comparison (180 rows)
+- [`docs/post_trimming_verification.csv`](docs/post_trimming_verification.csv) — Per-file verification (720 rows)
+
+
 
 ### Installed Tools
 - `cutadapt` — adapter trimming
@@ -194,14 +350,15 @@ Located at `/home/saravana/Downloads/smallRNA_references/`:
 | 1. Folder structure | ✅ Complete | 180 samples organized, 5 corrections applied |
 | 2. Barcode verification | ✅ Complete | 180 files scanned, 28 flagged for TCGT analysis |
 | 3. 5nt vs 9nt diagnostic | ✅ Complete | All 28 files confirmed TCGT error, ready for trimming |
-| 4. FastQC (pre-trim) | ⬜ Pending | Run on representative samples, aggregate with MultiQC |
-| 5. Trimming (cutadapt) | ⬜ Pending | Trim at 5nt barcode position using full adapter |
-| 6. Alignment (3-round) | ⬜ Pending | Bowtie2 to smallRNA index → hg38 → hairpin |
-| 7. Quantification | ⬜ Pending | featureCounts / custom counting, build count matrix |
-| 8. Normalization | ⬜ Pending | TPM, DESeq2 size factors |
-| 9. Differential Expression | ⬜ Pending | DESeq2, edgeR, volcano plots |
-| 10. tRF/yRF & isomiR | ⬜ Pending | Classification and extraction |
-| 11. Machine Learning | ⬜ Pending | RF, XGBoost, LASSO, SHAP |
+| 4. FastQC (pre-trim) | ✅ Complete | All 180 files; MultiQC aggregated; 0 samples excluded |
+| 5. Trimming (cutadapt) | ✅ Complete | Dual-pass strategy: 9nt exact + 5nt rescue; 99.89% retention |
+| 6. Post-trim verification | ✅ Complete | 180/180 verified; 50.3M reads rescued (5.48%) |
+| 7. Alignment (3-round) | ⬜ Pending | Bowtie2 to smallRNA index → hg38 → hairpin |
+| 8. Quantification | ⬜ Pending | featureCounts / custom counting, build count matrix |
+| 9. Normalization | ⬜ Pending | TPM, DESeq2 size factors |
+| 10. Differential Expression | ⬜ Pending | DESeq2, edgeR, volcano plots |
+| 11. tRF/yRF & isomiR | ⬜ Pending | Classification and extraction |
+| 12. Machine Learning | ⬜ Pending | RF, XGBoost, LASSO, SHAP |
 
 ---
 
